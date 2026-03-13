@@ -76,7 +76,7 @@ class CanvasWidget(QWidget):
             "text": self._text_tool,
         }
 
-        self._active_tool: BaseTool = self._pencil
+        self._active_tool: BaseTool | None = self._pencil
         self._engine.set_tool(self._active_tool)
 
         self._fg = QColor("#000000")
@@ -86,7 +86,7 @@ class CanvasWidget(QWidget):
         self._dragging = False
         self._last_btn: int = Qt.MouseButton.LeftButton
         self._selecting = False
-        self._sel_mode = "rect"
+        self._sel_mode: str = ""   # "" | "rect" | "free"
 
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -104,15 +104,24 @@ class CanvasWidget(QWidget):
         return self._selection
 
     def set_tool(self, name: str) -> None:
+        # Reset polygon whenever switching tools
+        if name != "polygon":
+            self._polygon._points.clear()
+
+        if name in ("select_rect", "select_free"):
+            self._active_tool = None
+            self._sel_mode = "rect" if name == "select_rect" else "free"
+            self._selection.clear()
+            self.tool_changed.emit(name)
+            return
+
         tool = self._all_tools.get(name)
         if tool is None:
             return
         self._active_tool = tool
+        self._sel_mode = ""
         self._engine.set_tool(tool)
         self.tool_changed.emit(name)
-        # Reset polygon if switching away
-        if name != "polygon":
-            self._polygon._points.clear()
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.1, min(8.0, zoom))
@@ -248,13 +257,24 @@ class CanvasWidget(QWidget):
         btn = event.button()
         self._last_btn = btn
 
+        if self._sel_mode:
+            self._selection.clear()
+            if self._sel_mode == "rect":
+                self._selection.begin_rect(pos)
+            else:
+                self._selection.begin_free(pos)
+            self._selecting = True
+            return
+
+        if self._active_tool is None:
+            return
+
         if self._active_tool.name == "text":
             self._text_tool.on_press(self._engine.image, pos, btn)
             self._show_text_dialog(pos)
             return
 
         if self._active_tool.name == "polygon":
-            # single click adds a point
             self._engine.save_state()
             self._polygon.add_point(self._engine.image, pos, btn)
             self.update()
@@ -265,19 +285,38 @@ class CanvasWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
-        if self._active_tool.name == "polygon":
+        if self._active_tool is not None and self._active_tool.name == "polygon":
             self._polygon.close_polygon(self._engine.image)
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
         self.cursor_moved.emit(pos.x(), pos.y())
+
+        if self._selecting and self._sel_mode:
+            if self._sel_mode == "rect":
+                self._selection.update_rect(pos)
+            else:
+                self._selection.update_free(pos)
+            self._selection.selection_changed.emit()
+            return
+
         if self._dragging:
             btn = event.buttons()
             self._engine.move(pos, btn)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
+
+        if self._selecting and self._sel_mode:
+            if self._sel_mode == "rect":
+                self._selection.update_rect(pos)
+            else:
+                self._selection.update_free(pos)
+            self._selection.close_selection()
+            self._selecting = False
+            return
+
         if self._dragging:
             self._engine.release(pos, event.button())
             self._dragging = False

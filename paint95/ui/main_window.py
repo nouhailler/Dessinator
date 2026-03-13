@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSlider, QGroupBox, QRadioButton, QCheckBox,
 )
 from PyQt6.QtGui import (
-    QAction, QKeySequence, QColor, QIcon, QCloseEvent,
+    QAction, QKeySequence, QColor, QIcon, QCloseEvent, QImage, QPainter,
 )
 from PyQt6.QtCore import Qt, QSize
 
@@ -387,11 +387,6 @@ class MainWindow(QMainWindow):
     # Tool / colour slots
     # ------------------------------------------------------------------
     def _on_tool_selected(self, name: str) -> None:
-        if name == "select_rect":
-            # handled by canvas internally (future)
-            return
-        if name == "select_free":
-            return
         self._canvas.set_tool(name)
 
     def _on_tool_changed(self, name: str) -> None:
@@ -491,13 +486,17 @@ class MainWindow(QMainWindow):
         self._do_save(self._current_file)
 
     def _file_save_as(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path, selected_filter = QFileDialog.getSaveFileName(
             self, "Enregistrer sous", "",
             "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
         if not path:
             return
-        self._do_save(Path(path))
+        p = Path(path)
+        if p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            ext = ".jpg" if "JPEG" in selected_filter else ".png"
+            p = p.with_suffix(ext)
+        self._do_save(p)
 
     def _do_save(self, path: Path) -> None:
         try:
@@ -540,6 +539,24 @@ class MainWindow(QMainWindow):
             self._engine.image_changed.emit()
 
     def _edit_paste(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QPoint, QRect
+
+        # System clipboard takes priority (e.g. screenshot paste)
+        cb_img = QApplication.clipboard().image()
+        if not cb_img.isNull():
+            self._engine.save_state()
+            cb_rgb = cb_img.convertToFormat(QImage.Format.Format_RGB32)
+            p = QPainter(self._engine.image)
+            p.drawImage(QPoint(0, 0), cb_rgb)
+            p.end()
+            sel = self._canvas.selection
+            sel._rect = QRect(0, 0, cb_rgb.width(), cb_rgb.height())
+            sel.selection_changed.emit()
+            self._engine.image_changed.emit()
+            return
+
+        # Internal selection clipboard (copy/cut within app)
         sel = self._canvas.selection
         if sel.get_clipboard() is not None:
             self._engine.save_state()
