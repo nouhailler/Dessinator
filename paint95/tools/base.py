@@ -1,12 +1,11 @@
 """
 Abstract base class for all drawing tools.
 """
-from abc import ABC, abstractmethod
-from PyQt6.QtGui import QMouseEvent, QPainter, QColor, QImage
-from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QPainter, QColor, QImage
+from PyQt6.QtCore import QObject, QPoint
 
 
-class BaseTool(ABC):
+class BaseTool(QObject):
     """
     Every tool receives press / move / release events and draws
     directly onto a QImage via a QPainter that the canvas provides.
@@ -16,6 +15,7 @@ class BaseTool(ABC):
     cursor: str = "crosshair"   # Qt cursor name or path
 
     def __init__(self) -> None:
+        super().__init__()
         self.foreground: QColor = QColor("#000000")
         self.background: QColor = QColor("#FFFFFF")
         self._last_point: QPoint | None = None
