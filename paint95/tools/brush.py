@@ -1,63 +1,59 @@
-"""Brush tool — configurable size (round or square)."""
-from __future__ import annotations
-from PyQt6.QtGui import QColor, QPainter, QBrush
-from PyQt6.QtCore import Qt
-from .base_tool import BaseTool
+"""
+Brush tool — configurable size, round or square shape.
+"""
+from PyQt6.QtGui import QImage, QPainter, QColor, QPen, QBrush
+from PyQt6.QtCore import QPoint, QRect, Qt
+from .base import BaseTool
 
 SIZES = [1, 3, 5, 8]
-SHAPES = ["round", "square"]
 
 
 class BrushTool(BaseTool):
-    name = "Pinceau"
+    name = "brush"
 
     def __init__(self) -> None:
         super().__init__()
         self.size: int = 3
-        self.shape: str = "round"
-        self._last_x = -1
-        self._last_y = -1
-        self._active = False
-        self._button = 1
+        self.round_shape: bool = True
 
-    def on_press(self, canvas, x: int, y: int, button: int) -> bool:
-        self._active = True
-        self._button = button
-        self._last_x = x
-        self._last_y = y
-        canvas.save_undo()
-        self._stamp(canvas.image, x, y, self._color(button))
-        return True
+    def _paint(self, image: QImage, pos: QPoint, color: QColor) -> None:
+        p = QPainter(image)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        half = self.size // 2
+        rect = QRect(pos.x() - half, pos.y() - half, self.size, self.size)
+        if self.round_shape:
+            p.drawEllipse(rect)
+        else:
+            p.drawRect(rect)
+        p.end()
 
-    def on_move(self, canvas, x: int, y: int, button: int) -> bool:
-        if not self._active:
-            return False
-        color = self._color(button)
-        steps = max(abs(x - self._last_x), abs(y - self._last_y), 1)
+    def _paint_line(self, image: QImage, p0: QPoint, p1: QPoint, color: QColor) -> None:
+        """Draw brush stamps along a line between two points."""
+        dx = p1.x() - p0.x()
+        dy = p1.y() - p0.y()
+        steps = max(abs(dx), abs(dy), 1)
         for i in range(steps + 1):
             t = i / steps
-            ix = int(self._last_x + t * (x - self._last_x))
-            iy = int(self._last_y + t * (y - self._last_y))
-            self._stamp(canvas.image, ix, iy, color)
-        self._last_x = x
-        self._last_y = y
+            x = round(p0.x() + dx * t)
+            y = round(p0.y() + dy * t)
+            self._paint(image, QPoint(x, y), color)
+
+    def on_press(self, image, pos, button):
+        color = self.foreground if button == Qt.MouseButton.LeftButton else self.background
+        self._active_color = color
+        self._paint(image, pos, color)
+        self._last_point = pos
         return True
 
-    def on_release(self, canvas, x: int, y: int, button: int) -> bool:
-        self._active = False
+    def on_move(self, image, pos, button):
+        if self._last_point is None:
+            return False
+        self._paint_line(image, self._last_point, pos, self._active_color)
+        self._last_point = pos
+        return True
+
+    def on_release(self, image, pos, button):
+        self._last_point = None
         return False
-
-    # ── helpers ─────────────────────────────────────────────────────────────
-    def _color(self, button: int) -> QColor:
-        return self._fg if button == 1 else self._bg
-
-    def _stamp(self, image, cx: int, cy: int, color: QColor) -> None:
-        r = max(self.size // 2, 0)
-        painter = QPainter(image)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(color))
-        if self.shape == "round":
-            painter.drawEllipse(cx - r, cy - r, self.size, self.size)
-        else:
-            painter.fillRect(cx - r, cy - r, self.size, self.size, color)
-        painter.end()

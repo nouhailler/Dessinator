@@ -1,181 +1,270 @@
-"""Main application window — menus, toolbar, canvas, palette, status bar."""
-from __future__ import annotations
-
+"""
+Main application window.
+Wires together: canvas, toolbar, palette, statusbar, menus.
+"""
 from pathlib import Path
-
-from PyQt6.QtCore import Qt, QRect, QSize
-from PyQt6.QtGui import QAction, QColor, QKeySequence, QIcon
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QStatusBar, QLabel, QDialog,
-    QFileDialog, QMessageBox, QInputDialog,
-    QSpinBox, QFormLayout, QDialogButtonBox, QSizePolicy,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QScrollArea, QFileDialog, QDialog, QDialogButtonBox,
+    QLabel, QSpinBox, QFormLayout, QMessageBox, QInputDialog,
+    QComboBox, QSlider, QGroupBox, QRadioButton, QCheckBox,
 )
+from PyQt6.QtGui import (
+    QAction, QKeySequence, QColor, QIcon, QCloseEvent,
+)
+from PyQt6.QtCore import Qt, QSize
 
-from canvas.canvas_widget import CanvasWidget, ZOOM_LEVELS
-from color.palette_manager import PaletteManager
-from file_io.image_loader import ImageLoader
-from file_io.image_saver import ImageSaver
-from ui.toolbar import ToolBox
-from ui.palette import PaletteWidget
+from ..canvas.canvas_widget import CanvasWidget
+from ..canvas.drawing_engine import DrawingEngine
+from ..color.palette_manager import PaletteManager
+from ..color.color_dialog import ColorPickerDialog
+from ..ui.toolbar import ToolBar
+from ..ui.palette import PaletteWidget
+from ..ui.statusbar import StatusBar
+from ..io.image_loader import load_image
+from ..io.image_saver import save_image
+from ..tools.shapes import FillMode
 
 
-# ── New-image dialog ─────────────────────────────────────────────────────────
+DEFAULT_WIDTH = 800
+DEFAULT_HEIGHT = 600
 
-class NewImageDialog(QDialog):
+
+# ── New canvas dialog ─────────────────────────────────────────────────────────
+
+class NewCanvasDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Nouvelle image")
+        self.setWindowTitle("Nouveau document")
         layout = QFormLayout(self)
 
         self._w = QSpinBox()
-        self._w.setRange(1, 4096)
-        self._w.setValue(800)
-        self._w.setSuffix(" px")
-
+        self._w.setRange(1, 8192)
+        self._w.setValue(DEFAULT_WIDTH)
         self._h = QSpinBox()
-        self._h.setRange(1, 4096)
-        self._h.setValue(600)
-        self._h.setSuffix(" px")
+        self._h.setRange(1, 8192)
+        self._h.setValue(DEFAULT_HEIGHT)
 
-        layout.addRow("Largeur :", self._w)
-        layout.addRow("Hauteur :", self._h)
+        layout.addRow("Largeur (px):", self._w)
+        layout.addRow("Hauteur (px):", self._h)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addRow(btns)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
 
-    def size(self) -> tuple[int, int]:
+    def size_px(self):
         return self._w.value(), self._h.value()
 
 
-# ── Main window ───────────────────────────────────────────────────────────────
+# ── Tool options panel ────────────────────────────────────────────────────────
+
+class ToolOptionsPanel(QWidget):
+    """A small panel below the menu that shows options for the active tool."""
+
+    def __init__(self, canvas: CanvasWidget, parent=None) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(4, 2, 4, 2)
+        self._layout.setSpacing(8)
+        self._widgets: list[QWidget] = []
+        self.setFixedHeight(36)
+
+    def update_for_tool(self, tool_name: str) -> None:
+        # Clear previous widgets
+        for w in self._widgets:
+            self._layout.removeWidget(w)
+            w.deleteLater()
+        self._widgets.clear()
+
+        if tool_name == "brush":
+            self._add_size_combo(
+                "Taille:", [1, 3, 5, 8],
+                lambda v: setattr(self._canvas.get_brush(), "size", v)
+            )
+            self._add_shape_radio(
+                lambda round_: setattr(self._canvas.get_brush(), "round_shape", round_)
+            )
+
+        elif tool_name == "eraser":
+            self._add_size_combo(
+                "Taille:", [8, 16, 32],
+                lambda v: setattr(self._canvas.get_eraser(), "size", v)
+            )
+
+        elif tool_name == "spray":
+            self._add_size_combo(
+                "Rayon:", [5, 10, 15, 25, 40],
+                lambda v: setattr(self._canvas.get_spray(), "radius", v)
+            )
+            self._add_size_combo(
+                "Densité:", [10, 20, 30, 50, 80],
+                lambda v: setattr(self._canvas.get_spray(), "density", v)
+            )
+
+        elif tool_name in ("line", "rectangle", "ellipse", "polygon", "curve"):
+            self._add_size_combo(
+                "Épaisseur:", [1, 2, 3, 5, 8],
+                lambda v: self._set_thickness(tool_name, v)
+            )
+            if tool_name in ("rectangle", "ellipse"):
+                self._add_fill_mode_combo(tool_name)
+
+    def _add_size_combo(self, label: str, values: list[int], callback) -> None:
+        lbl = QLabel(label)
+        combo = QComboBox()
+        for v in values:
+            combo.addItem(str(v), v)
+        combo.currentIndexChanged.connect(
+            lambda _: callback(combo.currentData())
+        )
+        self._layout.addWidget(lbl)
+        self._layout.addWidget(combo)
+        self._widgets += [lbl, combo]
+
+    def _add_shape_radio(self, callback) -> None:
+        lbl = QLabel("Forme:")
+        round_rb = QRadioButton("Rond")
+        square_rb = QRadioButton("Carré")
+        round_rb.setChecked(True)
+        round_rb.toggled.connect(lambda checked: callback(checked))
+        for w in (lbl, round_rb, square_rb):
+            self._layout.addWidget(w)
+            self._widgets.append(w)
+
+    def _add_fill_mode_combo(self, tool_name: str) -> None:
+        lbl = QLabel("Remplissage:")
+        combo = QComboBox()
+        combo.addItem("Contour seulement", FillMode.OUTLINE)
+        combo.addItem("Rempli seulement", FillMode.FILLED)
+        combo.addItem("Contour + remplissage", FillMode.BOTH)
+
+        def _set(idx):
+            mode = combo.currentData()
+            if tool_name == "rectangle":
+                self._canvas.get_rect_tool().fill_mode = mode
+            else:
+                self._canvas.get_ellipse().fill_mode = mode
+
+        combo.currentIndexChanged.connect(_set)
+        for w in (lbl, combo):
+            self._layout.addWidget(w)
+            self._widgets.append(w)
+
+    def _set_thickness(self, tool_name: str, v: int) -> None:
+        if tool_name == "line":
+            self._canvas.get_line().thickness = v
+        elif tool_name == "rectangle":
+            self._canvas.get_rect_tool().thickness = v
+        elif tool_name == "ellipse":
+            self._canvas.get_ellipse().thickness = v
+        elif tool_name == "polygon":
+            self._canvas.get_polygon().thickness = v
+        elif tool_name == "curve":
+            self._canvas.get_line().thickness = v  # reuse line thickness
+
+
+# ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
-
-    APP_NAME = "Dessinator"
-    VERSION = "1.0"
-
     def __init__(self) -> None:
         super().__init__()
-        self._palette_manager = PaletteManager()
-        self._current_path: str | None = None
+        self.setWindowTitle("Dessinator — Paint moderne")
+        self.setMinimumSize(900, 650)
+
+        self._current_file: Path | None = None
         self._modified = False
 
-        self._build_ui()
-        self._build_menus()
-        self._build_status_bar()
-        self._wire_signals()
+        # Core components
+        self._engine = DrawingEngine(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        self._palette_mgr = PaletteManager()
 
-        self.setWindowTitle(self.APP_NAME)
-        self.resize(1100, 750)
+        # Canvas
+        self._canvas = CanvasWidget(self._engine)
+        self._canvas.cursor_moved.connect(self._on_cursor)
+        self._canvas.tool_changed.connect(self._on_tool_changed)
+        self._canvas.zoom_changed.connect(self._on_zoom_changed)
+        self._canvas.color_picked.connect(self._on_color_picked)
+        self._engine.image_changed.connect(self._mark_modified)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # UI construction
-    # ═══════════════════════════════════════════════════════════════════════
+        # Toolbar
+        self._toolbar = ToolBar()
+        self._toolbar.tool_selected.connect(self._on_tool_selected)
 
-    def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        # Palette
+        self._palette = PaletteWidget(self._palette_mgr)
+        self._palette.fg_changed.connect(self._on_fg_changed)
+        self._palette.bg_changed.connect(self._on_bg_changed)
 
-        # ── middle area: toolbox + canvas ────────────────────────────────────
-        middle = QHBoxLayout()
-        middle.setContentsMargins(0, 0, 0, 0)
-        middle.setSpacing(0)
+        # Status bar
+        self._status = StatusBar()
+        self.setStatusBar(self._status)
+        self._status.update_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
-        self._toolbox = ToolBox()
-        middle.addWidget(self._toolbox)
+        # Tool options
+        self._tool_options = ToolOptionsPanel(self._canvas)
+        self._canvas.tool_changed.connect(self._tool_options.update_for_tool)
 
+        # Scroll area for canvas
         self._scroll = QScrollArea()
+        self._scroll.setWidget(self._canvas)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._scroll.setStyleSheet("background: #6b6b6b;")
         self._scroll.setWidgetResizable(False)
 
-        self._canvas = CanvasWidget()
-        self._scroll.setWidget(self._canvas)
-        middle.addWidget(self._scroll, stretch=1)
+        # Central layout
+        central = QWidget()
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        outer.addLayout(middle, stretch=1)
+        main_layout.addWidget(self._tool_options)
 
-        # ── palette bar ──────────────────────────────────────────────────────
-        self._palette_bar = PaletteWidget(self._palette_manager)
-        self._palette_bar.setFixedHeight(52)
-        self._palette_bar.setStyleSheet("background: #f0f0f0; border-top: 1px solid #ccc;")
-        outer.addWidget(self._palette_bar)
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+        content.addWidget(self._toolbar)
+        content.addWidget(self._scroll, 1)
+        main_layout.addLayout(content, 1)
+        main_layout.addWidget(self._palette)
 
-        # ── connect pipette callbacks ────────────────────────────────────────
-        self._toolbox.set_pipette_callbacks(
-            self._palette_bar.set_fg,
-            self._palette_bar.set_bg,
-        )
+        self.setCentralWidget(central)
 
-        # Set initial tool
-        self._toolbox.tool_selected.connect(self._on_tool_selected)
-        # Trigger default tool
-        from tools.pencil import PencilTool
-        self._canvas.set_tool(self._toolbox.tool("pencil"))
+        self._build_menus()
+        self._update_canvas_colors()
 
-    def _build_status_bar(self) -> None:
-        sb = QStatusBar()
-        self.setStatusBar(sb)
-
-        self._lbl_pos = QLabel("x: 0  y: 0")
-        self._lbl_pos.setFixedWidth(120)
-
-        self._lbl_size = QLabel(
-            f"800 × 600 px"
-        )
-        self._lbl_size.setFixedWidth(120)
-
-        self._lbl_tool = QLabel("Crayon")
-        self._lbl_zoom = QLabel("100 %")
-        self._lbl_zoom.setFixedWidth(60)
-
-        sb.addWidget(self._lbl_pos)
-        sb.addWidget(QLabel("|"))
-        sb.addWidget(self._lbl_size)
-        sb.addWidget(QLabel("|"))
-        sb.addWidget(self._lbl_tool)
-        sb.addPermanentWidget(self._lbl_zoom)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Menu bar
-    # ═══════════════════════════════════════════════════════════════════════
-
+    # ------------------------------------------------------------------
+    # Menus
+    # ------------------------------------------------------------------
     def _build_menus(self) -> None:
         mb = self.menuBar()
 
-        # ── Fichier ──────────────────────────────────────────────────────────
+        # ── Fichier ──
         file_menu = mb.addMenu("&Fichier")
 
         act_new = QAction("&Nouveau", self)
         act_new.setShortcut(QKeySequence("Ctrl+N"))
-        act_new.triggered.connect(self._new_file)
+        act_new.triggered.connect(self._file_new)
         file_menu.addAction(act_new)
 
         act_open = QAction("&Ouvrir…", self)
         act_open.setShortcut(QKeySequence("Ctrl+O"))
-        act_open.triggered.connect(self._open_file)
+        act_open.triggered.connect(self._file_open)
         file_menu.addAction(act_open)
 
         file_menu.addSeparator()
 
         act_save = QAction("&Enregistrer", self)
         act_save.setShortcut(QKeySequence("Ctrl+S"))
-        act_save.triggered.connect(self._save_file)
+        act_save.triggered.connect(self._file_save)
         file_menu.addAction(act_save)
 
-        act_saveas = QAction("Enregistrer &sous…", self)
-        act_saveas.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        act_saveas.triggered.connect(self._save_file_as)
-        file_menu.addAction(act_saveas)
+        act_save_as = QAction("Enregistrer &sous…", self)
+        act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        act_save_as.triggered.connect(self._file_save_as)
+        file_menu.addAction(act_save_as)
 
         file_menu.addSeparator()
 
@@ -184,151 +273,199 @@ class MainWindow(QMainWindow):
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
 
-        # ── Édition ──────────────────────────────────────────────────────────
+        # ── Édition ──
         edit_menu = mb.addMenu("&Édition")
 
         act_undo = QAction("&Annuler", self)
         act_undo.setShortcut(QKeySequence("Ctrl+Z"))
-        act_undo.triggered.connect(self._canvas.undo)
+        act_undo.triggered.connect(self._engine.undo)
         edit_menu.addAction(act_undo)
 
-        act_redo = QAction("Rétablir", self)
+        act_redo = QAction("&Rétablir", self)
         act_redo.setShortcut(QKeySequence("Ctrl+Y"))
-        act_redo.triggered.connect(self._canvas.redo)
+        act_redo.triggered.connect(self._engine.redo)
         edit_menu.addAction(act_redo)
 
         edit_menu.addSeparator()
 
         act_copy = QAction("&Copier", self)
         act_copy.setShortcut(QKeySequence("Ctrl+C"))
-        act_copy.triggered.connect(self._canvas.copy_selection)
+        act_copy.triggered.connect(self._edit_copy)
         edit_menu.addAction(act_copy)
 
-        act_cut = QAction("C&ouper", self)
+        act_cut = QAction("Co&uper", self)
         act_cut.setShortcut(QKeySequence("Ctrl+X"))
-        act_cut.triggered.connect(self._canvas.cut_selection)
+        act_cut.triggered.connect(self._edit_cut)
         edit_menu.addAction(act_cut)
 
-        act_paste = QAction("C&oller", self)
+        act_paste = QAction("Co&ller", self)
         act_paste.setShortcut(QKeySequence("Ctrl+V"))
-        act_paste.triggered.connect(self._canvas.paste)
+        act_paste.triggered.connect(self._edit_paste)
         edit_menu.addAction(act_paste)
 
-        act_delete = QAction("S&upprimer", self)
+        act_delete = QAction("&Supprimer", self)
         act_delete.setShortcut(QKeySequence("Delete"))
-        act_delete.triggered.connect(self._canvas.delete_selection)
+        act_delete.triggered.connect(self._edit_delete)
         edit_menu.addAction(act_delete)
 
-        # ── Image ────────────────────────────────────────────────────────────
-        image_menu = mb.addMenu("&Image")
+        edit_menu.addSeparator()
+
+        act_sel_all = QAction("Tout sé&lectionner", self)
+        act_sel_all.setShortcut(QKeySequence("Ctrl+A"))
+        act_sel_all.triggered.connect(self._edit_select_all)
+        edit_menu.addAction(act_sel_all)
+
+        # ── Image ──
+        img_menu = mb.addMenu("&Image")
 
         act_invert = QAction("&Inverser les couleurs", self)
-        act_invert.triggered.connect(self._canvas.invert_colors)
-        image_menu.addAction(act_invert)
+        act_invert.triggered.connect(self._engine.invert_colors)
+        img_menu.addAction(act_invert)
 
-        image_menu.addSeparator()
+        act_flip_h = QAction("Retourner &horizontalement", self)
+        act_flip_h.triggered.connect(self._engine.flip_horizontal)
+        img_menu.addAction(act_flip_h)
 
-        act_fh = QAction("Retourner &horizontalement", self)
-        act_fh.triggered.connect(self._canvas.flip_horizontal)
-        image_menu.addAction(act_fh)
+        act_flip_v = QAction("Retourner &verticalement", self)
+        act_flip_v.triggered.connect(self._engine.flip_vertical)
+        img_menu.addAction(act_flip_v)
 
-        act_fv = QAction("Retourner &verticalement", self)
-        act_fv.triggered.connect(self._canvas.flip_vertical)
-        image_menu.addAction(act_fv)
+        img_menu.addSeparator()
 
-        image_menu.addSeparator()
+        act_resize = QAction("Re&dimensionner…", self)
+        act_resize.triggered.connect(self._image_resize)
+        img_menu.addAction(act_resize)
 
-        act_resize = QAction("Redimensionner…", self)
-        act_resize.triggered.connect(self._resize_image)
-        image_menu.addAction(act_resize)
+        # ── Affichage ──
+        view_menu = mb.addMenu("&Affichage")
 
-        # ── Affichage ────────────────────────────────────────────────────────
-        view_menu = mb.addMenu("A&ffichage")
+        act_zoom_in = QAction("Zoom &+", self)
+        act_zoom_in.setShortcut(QKeySequence("Ctrl++"))
+        act_zoom_in.triggered.connect(self._canvas.zoom_in)
+        view_menu.addAction(act_zoom_in)
 
-        act_zin = QAction("Zoom &+", self)
-        act_zin.setShortcut(QKeySequence("Ctrl++"))
-        act_zin.triggered.connect(self._canvas.zoom_in)
-        view_menu.addAction(act_zin)
+        act_zoom_out = QAction("Zoom &-", self)
+        act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        act_zoom_out.triggered.connect(self._canvas.zoom_out)
+        view_menu.addAction(act_zoom_out)
 
-        act_zout = QAction("Zoom &-", self)
-        act_zout.setShortcut(QKeySequence("Ctrl+-"))
-        act_zout.triggered.connect(self._canvas.zoom_out)
-        view_menu.addAction(act_zout)
-
-        zoom_menu = view_menu.addMenu("Niveau de zoom")
-        for z in ZOOM_LEVELS:
-            a = QAction(f"{z} %", self)
-            a.triggered.connect(lambda checked, zz=z: self._canvas.set_zoom_level(zz))
-            zoom_menu.addAction(a)
+        act_zoom_100 = QAction("Zoom &100%", self)
+        act_zoom_100.setShortcut(QKeySequence("Ctrl+0"))
+        act_zoom_100.triggered.connect(lambda: self._canvas.set_zoom(1.0))
+        view_menu.addAction(act_zoom_100)
 
         view_menu.addSeparator()
 
-        act_grid = QAction("Grille &pixels", self)
+        act_grid = QAction("&Grille pixel", self)
         act_grid.setCheckable(True)
         act_grid.setShortcut(QKeySequence("Ctrl+G"))
-        act_grid.triggered.connect(self._canvas.toggle_grid)
+        act_grid.toggled.connect(self._canvas.set_show_grid)
         view_menu.addAction(act_grid)
 
-        # ── Palette ──────────────────────────────────────────────────────────
-        palette_menu = mb.addMenu("&Palette")
+        # ── Palette ──
+        pal_menu = mb.addMenu("&Palette")
 
-        act_save_pal = QAction("Sauvegarder la palette…", self)
+        act_fg = QAction("Couleur &avant-plan…", self)
+        act_fg.triggered.connect(self._pick_fg)
+        pal_menu.addAction(act_fg)
+
+        act_bg = QAction("Couleur &arrière-plan…", self)
+        act_bg.triggered.connect(self._pick_bg)
+        pal_menu.addAction(act_bg)
+
+        pal_menu.addSeparator()
+
+        act_save_pal = QAction("&Sauvegarder palette…", self)
         act_save_pal.triggered.connect(self._save_palette)
-        palette_menu.addAction(act_save_pal)
+        pal_menu.addAction(act_save_pal)
 
-        act_load_pal = QAction("Charger une palette…", self)
+        act_load_pal = QAction("&Charger palette…", self)
         act_load_pal.triggered.connect(self._load_palette)
-        palette_menu.addAction(act_load_pal)
+        pal_menu.addAction(act_load_pal)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Signal wiring
-    # ═══════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
+    # Tool / colour slots
+    # ------------------------------------------------------------------
+    def _on_tool_selected(self, name: str) -> None:
+        if name == "select_rect":
+            # handled by canvas internally (future)
+            return
+        if name == "select_free":
+            return
+        self._canvas.set_tool(name)
 
-    def _wire_signals(self) -> None:
-        self._canvas.mouse_moved.connect(self._on_mouse_moved)
-        self._canvas.zoom_changed.connect(self._on_zoom_changed)
-        self._palette_bar.fg_changed.connect(self._on_colors_changed)
-        self._palette_bar.bg_changed.connect(self._on_colors_changed)
-        # Initial colour sync
-        self._on_colors_changed()
+    def _on_tool_changed(self, name: str) -> None:
+        self._status.update_tool(name)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Slots
-    # ═══════════════════════════════════════════════════════════════════════
+    def _on_cursor(self, x: int, y: int) -> None:
+        self._status.update_cursor(x, y)
 
-    def _on_tool_selected(self, tool) -> None:
-        self._canvas.set_tool(tool)
-        self._lbl_tool.setText(tool.name)
+    def _on_zoom_changed(self, zoom: float) -> None:
+        self._status.update_zoom(zoom)
 
-    def _on_mouse_moved(self, x: int, y: int) -> None:
-        self._lbl_pos.setText(f"x: {x}  y: {y}")
+    def _on_color_picked(self, color: QColor, is_fg: bool) -> None:
+        if is_fg:
+            self._palette_mgr.foreground = color
+            self._palette.set_fg(color)
+        else:
+            self._palette_mgr.background = color
+            self._palette.set_bg(color)
+        self._update_canvas_colors()
 
-    def _on_zoom_changed(self, zoom: int) -> None:
-        self._lbl_zoom.setText(f"{zoom} %")
+    def _on_fg_changed(self, color: QColor) -> None:
+        self._update_canvas_colors()
 
-    def _on_colors_changed(self, _color=None) -> None:
-        self._canvas.update_colors(
-            self._palette_manager.foreground,
-            self._palette_manager.background,
+    def _on_bg_changed(self, color: QColor) -> None:
+        self._update_canvas_colors()
+
+    def _update_canvas_colors(self) -> None:
+        self._canvas.set_colors(
+            self._palette_mgr.foreground,
+            self._palette_mgr.background,
         )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # File operations
-    # ═══════════════════════════════════════════════════════════════════════
+    def _pick_fg(self) -> None:
+        dlg = ColorPickerDialog(self._palette_mgr.foreground, self)
+        if dlg.exec():
+            c = dlg.selected_color()
+            self._palette_mgr.foreground = c
+            self._palette.set_fg(c)
+            self._update_canvas_colors()
 
-    def _new_file(self) -> None:
+    def _pick_bg(self) -> None:
+        dlg = ColorPickerDialog(self._palette_mgr.background, self)
+        if dlg.exec():
+            c = dlg.selected_color()
+            self._palette_mgr.background = c
+            self._palette.set_bg(c)
+            self._update_canvas_colors()
+
+    def _mark_modified(self) -> None:
+        if not self._modified:
+            self._modified = True
+            self._update_title()
+
+    def _update_title(self) -> None:
+        name = self._current_file.name if self._current_file else "Sans titre"
+        mod = " *" if self._modified else ""
+        self.setWindowTitle(f"Dessinator — {name}{mod}")
+
+    # ------------------------------------------------------------------
+    # File actions
+    # ------------------------------------------------------------------
+    def _file_new(self) -> None:
         if not self._confirm_discard():
             return
-        dlg = NewImageDialog(self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            w, h = dlg.size()
-            self._canvas.new_image(w, h, self._palette_manager.background)
-            self._current_path = None
+        dlg = NewCanvasDialog(self)
+        if dlg.exec():
+            w, h = dlg.size_px()
+            self._engine.new(w, h)
+            self._status.update_size(w, h)
+            self._current_file = None
             self._modified = False
             self._update_title()
-            self._update_size_label()
 
-    def _open_file(self) -> None:
+    def _file_open(self) -> None:
         if not self._confirm_discard():
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -338,123 +475,144 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            image = ImageLoader.load(path)
-            self._canvas.load_image(image)
-            self._current_path = path
+            img = load_image(path)
+            self._engine.replace_image(img)
+            self._current_file = Path(path)
             self._modified = False
             self._update_title()
-            self._update_size_label()
+            self._status.update_size(img.width(), img.height())
         except Exception as e:
-            QMessageBox.critical(self, "Erreur", f"Impossible d'ouvrir :\n{e}")
+            QMessageBox.critical(self, "Erreur d'ouverture", str(e))
 
-    def _save_file(self) -> None:
-        if self._current_path:
-            self._do_save(self._current_path)
-        else:
-            self._save_file_as()
+    def _file_save(self) -> None:
+        if self._current_file is None:
+            self._file_save_as()
+            return
+        self._do_save(self._current_file)
 
-    def _save_file_as(self) -> None:
+    def _file_save_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Enregistrer sous", "",
             "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
         if not path:
             return
-        # Ensure extension
-        p = Path(path)
-        if p.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
-            path = str(p) + ".png"
-        self._do_save(path)
+        self._do_save(Path(path))
 
-    def _do_save(self, path: str) -> None:
+    def _do_save(self, path: Path) -> None:
         try:
-            ImageSaver.save(self._canvas.image, path)
-            self._current_path = path
+            save_image(self._engine.image, path)
+            self._current_file = path
             self._modified = False
             self._update_title()
         except Exception as e:
-            QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer :\n{e}")
+            QMessageBox.critical(self, "Erreur d'enregistrement", str(e))
 
-    # ── image operations ────────────────────────────────────────────────────
+    def _confirm_discard(self) -> bool:
+        if not self._modified:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Modifications non sauvegardées",
+            "Le document a été modifié. Voulez-vous enregistrer les changements ?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            self._file_save()
+            return not self._modified   # False if save was cancelled
+        return answer == QMessageBox.StandardButton.Discard
 
-    def _resize_image(self) -> None:
-        w = self._canvas.image.width()
-        h = self._canvas.image.height()
-        dlg = NewImageDialog(self)
-        dlg.setWindowTitle("Redimensionner l'image")
-        # Hack: pre-fill with current values
-        dlg._w.setValue(w)
-        dlg._h.setValue(h)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            nw, nh = dlg.size()
-            from PyQt6.QtGui import QImage
-            self._canvas.save_undo()
-            scaled = self._canvas.image.scaled(
-                nw, nh,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            ).convertToFormat(QImage.Format.Format_ARGB32)
-            self._canvas.load_image(scaled)
-            self._update_size_label()
+    # ------------------------------------------------------------------
+    # Edit actions
+    # ------------------------------------------------------------------
+    def _edit_copy(self) -> None:
+        sel = self._canvas.selection
+        if sel.has_selection:
+            sel.copy(self._engine.image)
 
-    # ── palette operations ──────────────────────────────────────────────────
+    def _edit_cut(self) -> None:
+        sel = self._canvas.selection
+        if sel.has_selection:
+            self._engine.save_state()
+            sel.cut(self._engine.image, self._palette_mgr.background)
+            self._engine.image_changed.emit()
 
+    def _edit_paste(self) -> None:
+        sel = self._canvas.selection
+        if sel.get_clipboard() is not None:
+            self._engine.save_state()
+            sel.paste(self._engine.image)
+            self._engine.image_changed.emit()
+
+    def _edit_delete(self) -> None:
+        sel = self._canvas.selection
+        if sel.has_selection:
+            self._engine.save_state()
+            sel.delete(self._engine.image, self._palette_mgr.background)
+            self._engine.image_changed.emit()
+
+    def _edit_select_all(self) -> None:
+        from PyQt6.QtCore import QRect
+        img = self._engine.image
+        self._canvas.selection._rect = QRect(0, 0, img.width(), img.height())
+        self._canvas.selection.selection_changed.emit()
+
+    # ------------------------------------------------------------------
+    # Image actions
+    # ------------------------------------------------------------------
+    def _image_resize(self) -> None:
+        img = self._engine.image
+        w, ok_w = QInputDialog.getInt(
+            self, "Redimensionner", "Nouvelle largeur (px):",
+            img.width(), 1, 8192
+        )
+        if not ok_w:
+            return
+        h, ok_h = QInputDialog.getInt(
+            self, "Redimensionner", "Nouvelle hauteur (px):",
+            img.height(), 1, 8192
+        )
+        if not ok_h:
+            return
+        self._engine.resize(w, h)
+        self._status.update_size(w, h)
+
+    # ------------------------------------------------------------------
+    # Palette persistence
+    # ------------------------------------------------------------------
     def _save_palette(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Sauvegarder la palette", "palette.json",
-            "JSON (*.json)"
+            self, "Sauvegarder palette", "palette.json", "JSON (*.json)"
         )
         if path:
             try:
-                self._palette_manager.save(path)
+                self._palette_mgr.save(Path(path))
             except Exception as e:
                 QMessageBox.critical(self, "Erreur", str(e))
 
     def _load_palette(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Charger une palette", "",
-            "JSON (*.json)"
+            self, "Charger palette", "", "JSON (*.json)"
         )
         if path:
             try:
-                self._palette_manager.load(path)
-                # Rebuild palette widget
-                self._palette_bar._grid._colors = self._palette_manager.colors
-                self._palette_bar._grid.update()
-                self._palette_bar._squares.set_fg(self._palette_manager.foreground)
-                self._palette_bar._squares.set_bg(self._palette_manager.background)
-                self._on_colors_changed()
+                self._palette_mgr.load(Path(path))
+                # Refresh palette widget
+                for i, swatch in enumerate(self._palette._swatches):
+                    if i < len(self._palette_mgr.colors):
+                        swatch.set_color(self._palette_mgr.colors[i])
+                self._palette.set_fg(self._palette_mgr.foreground)
+                self._palette.set_bg(self._palette_mgr.background)
+                self._update_canvas_colors()
             except Exception as e:
                 QMessageBox.critical(self, "Erreur", str(e))
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Helpers
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _confirm_discard(self) -> bool:
-        if not self._modified:
-            return True
-        reply = QMessageBox.question(
-            self, "Modifications non enregistrées",
-            "Voulez-vous ignorer les modifications ?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        return reply == QMessageBox.StandardButton.Yes
-
-    def _update_title(self) -> None:
-        name = Path(self._current_path).name if self._current_path else "Sans titre"
-        marker = " *" if self._modified else ""
-        self.setWindowTitle(f"{name}{marker} — {self.APP_NAME}")
-
-    def _update_size_label(self) -> None:
-        w = self._canvas.image.width()
-        h = self._canvas.image.height()
-        self._lbl_size.setText(f"{w} × {h} px")
-
-    # ── close event ─────────────────────────────────────────────────────────
-
-    def closeEvent(self, event) -> None:
+    # ------------------------------------------------------------------
+    # Close
+    # ------------------------------------------------------------------
+    def closeEvent(self, event: QCloseEvent) -> None:
         if self._confirm_discard():
             event.accept()
         else:

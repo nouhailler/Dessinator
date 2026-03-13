@@ -1,52 +1,67 @@
-"""Flood-fill tool (scanline algorithm via Pillow for performance)."""
-from __future__ import annotations
-import io as _io
-from PyQt6.QtGui import QColor, QImage
-from PyQt6.QtCore import QBuffer, QIODeviceBase
-from PIL import Image, ImageDraw
-from .base_tool import BaseTool
+"""
+Flood-fill tool — scanline flood fill algorithm.
+"""
+from PyQt6.QtGui import QImage, QColor
+from PyQt6.QtCore import QPoint, Qt
+from .base import BaseTool
 
 
-def _qimage_to_pil(image: QImage) -> Image.Image:
-    buf = QBuffer()
-    buf.open(QIODeviceBase.OpenModeFlag.WriteOnly)
-    image.save(buf, "PNG")
-    buf.close()
-    return Image.open(_io.BytesIO(bytes(buf.data()))).convert("RGBA")
+def _scanline_fill(image: QImage, x: int, y: int, fill_color: QColor) -> None:
+    """Scanline flood fill. Modifies image in-place."""
+    w, h = image.width(), image.height()
+    target_rgb = image.pixel(x, y)
+    fill_rgb = fill_color.rgb()
 
+    if target_rgb == fill_rgb:
+        return
 
-def _pil_to_qimage(pil_img: Image.Image) -> QImage:
-    data = pil_img.tobytes("raw", "RGBA")
-    qimg = QImage(data, pil_img.width, pil_img.height,
-                  QImage.Format.Format_RGBA8888)
-    return qimg.convertToFormat(QImage.Format.Format_ARGB32).copy()
+    stack: list[tuple[int, int]] = [(x, y)]
+    visited: set[tuple[int, int]] = set()
+
+    while stack:
+        cx, cy = stack.pop()
+        if (cx, cy) in visited:
+            continue
+        if cx < 0 or cx >= w or cy < 0 or cy >= h:
+            continue
+        if image.pixel(cx, cy) != target_rgb:
+            continue
+
+        # Scan left
+        lx = cx
+        while lx >= 0 and image.pixel(lx, cy) == target_rgb:
+            lx -= 1
+        lx += 1
+
+        # Scan right
+        rx = cx
+        while rx < w and image.pixel(rx, cy) == target_rgb:
+            rx += 1
+        rx -= 1
+
+        # Fill the span
+        for nx in range(lx, rx + 1):
+            image.setPixel(nx, cy, fill_rgb)
+            visited.add((nx, cy))
+            # Enqueue above and below
+            if cy > 0 and image.pixel(nx, cy - 1) == target_rgb:
+                stack.append((nx, cy - 1))
+            if cy < h - 1 and image.pixel(nx, cy + 1) == target_rgb:
+                stack.append((nx, cy + 1))
 
 
 class FillTool(BaseTool):
-    name = "Remplissage"
+    name = "fill"
 
-    def on_press(self, canvas, x: int, y: int, button: int) -> bool:
-        color = self._fg if button == 1 else self._bg
-        new_image = self._flood_fill(canvas.image, x, y, color)
-        if new_image is not None:
-            canvas.save_undo()
-            canvas.replace_image(new_image)
-            return True
+    def on_press(self, image, pos, button):
+        color = self.foreground if button == Qt.MouseButton.LeftButton else self.background
+        x, y = pos.x(), pos.y()
+        if 0 <= x < image.width() and 0 <= y < image.height():
+            _scanline_fill(image, x, y, color)
+        return True
+
+    def on_move(self, image, pos, button):
         return False
 
-    def _flood_fill(self, image: QImage, x: int, y: int,
-                    fill_color: QColor) -> QImage | None:
-        w, h = image.width(), image.height()
-        if not (0 <= x < w and 0 <= y < h):
-            return None
-
-        pil_img = _qimage_to_pil(image)
-        target = pil_img.getpixel((x, y))
-        fill = (fill_color.red(), fill_color.green(),
-                fill_color.blue(), fill_color.alpha())
-
-        if target == fill:
-            return None
-
-        ImageDraw.floodfill(pil_img, (x, y), fill, thresh=0)
-        return _pil_to_qimage(pil_img)
+    def on_release(self, image, pos, button):
+        return False

@@ -1,40 +1,47 @@
-"""Circular undo/redo stack limited to 3 history levels."""
+"""
+Undo/Redo manager using a circular stack of image snapshots.
+Limited to 3 levels of undo as per specifications.
+"""
 from collections import deque
 from PyQt6.QtGui import QImage
 
 
+MAX_UNDO_LEVELS = 3
+
+
 class UndoManager:
-    """Stores image snapshots for undo/redo. Max 3 undo levels."""
+    """Manages undo/redo history with image snapshots."""
 
-    def __init__(self, max_levels: int = 3):
-        self._history: deque[QImage] = deque(maxlen=max_levels)
-        self._redo: deque[QImage] = deque(maxlen=max_levels)
+    def __init__(self, max_levels: int = MAX_UNDO_LEVELS):
+        self._max_levels = max_levels
+        self._undo_stack: deque[QImage] = deque(maxlen=max_levels)
+        self._redo_stack: deque[QImage] = deque(maxlen=max_levels)
 
-    def push(self, image: QImage) -> None:
-        """Save current state before a modification."""
-        self._history.append(image.copy())
-        self._redo.clear()
+    def save_state(self, image: QImage) -> None:
+        """Save a snapshot of the current canvas state."""
+        self._undo_stack.append(image.copy())
+        self._redo_stack.clear()
 
     def undo(self, current_image: QImage) -> QImage | None:
-        """Undo last action. Returns restored image, or None if nothing to undo."""
-        if not self._history:
+        """Return the previous state, or None if unavailable."""
+        if not self._undo_stack:
             return None
-        self._redo.append(current_image.copy())
-        return self._history.pop().copy()
+        self._redo_stack.append(current_image.copy())
+        return self._undo_stack.pop()
 
     def redo(self, current_image: QImage) -> QImage | None:
-        """Redo last undone action. Returns restored image, or None if nothing to redo."""
-        if not self._redo:
+        """Return the next (redone) state, or None if unavailable."""
+        if not self._redo_stack:
             return None
-        self._history.append(current_image.copy())
-        return self._redo.pop().copy()
+        self._undo_stack.append(current_image.copy())
+        return self._redo_stack.pop()
 
     def can_undo(self) -> bool:
-        return len(self._history) > 0
+        return len(self._undo_stack) > 0
 
     def can_redo(self) -> bool:
-        return len(self._redo) > 0
+        return len(self._redo_stack) > 0
 
     def clear(self) -> None:
-        self._history.clear()
-        self._redo.clear()
+        self._undo_stack.clear()
+        self._redo_stack.clear()

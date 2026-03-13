@@ -1,361 +1,330 @@
-"""Core raster canvas widget.
-
-Responsibilities
-----------------
-* Holds the current QImage (ARGB32).
-* Scales the image for display according to zoom level.
-* Converts screen ↔ image coordinates.
-* Dispatches mouse events to the active tool.
-* Manages the shape-preview buffer.
-* Manages the selection rectangle overlay.
-* Proxies undo/redo to UndoManager.
 """
-from __future__ import annotations
+Canvas widget: displays the QImage with zoom, grid, and selection overlay.
+Handles all mouse and keyboard events, then delegates to DrawingEngine.
+"""
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QInputDialog, QFontDialog
+from PyQt6.QtGui import (
+    QPainter, QColor, QPen, QFont, QMouseEvent, QWheelEvent,
+    QKeyEvent, QCursor, QImage,
+)
+from PyQt6.QtCore import (
+    Qt, QPoint, QRect, QSize, pyqtSignal, QObject,
+)
 
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen
-from PyQt6.QtWidgets import QWidget, QSizePolicy
+from .drawing_engine import DrawingEngine
+from .selection_manager import SelectionManager
+from ..tools.base import BaseTool
+from ..tools.pencil import PencilTool
+from ..tools.brush import BrushTool
+from ..tools.eraser import EraserTool
+from ..tools.spray import SprayTool
+from ..tools.fill import FillTool
+from ..tools.pipette import PipetteTool
+from ..tools.shapes import LineTool, RectangleTool, EllipseTool, PolygonTool, CurveTool, TextTool
 
-from history.undo_manager import UndoManager
-from file_io.image_loader import ImageLoader
-
-ZOOM_LEVELS = [10, 25, 50, 75, 100, 150, 200, 400, 800]
-DEFAULT_ZOOM_IDX = 4  # 100 %
+ZOOM_LEVELS = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+GRID_MIN_ZOOM = 4.0
 
 
 class CanvasWidget(QWidget):
-    """The drawing surface — a fixed-size QWidget backed by a QImage."""
+    """The central drawing surface."""
 
-    mouse_moved = pyqtSignal(int, int)   # image-space x, y
-    zoom_changed = pyqtSignal(int)       # new zoom %
+    cursor_moved = pyqtSignal(int, int)   # x, y in image coordinates
+    tool_changed = pyqtSignal(str)
+    zoom_changed = pyqtSignal(float)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, engine: DrawingEngine, parent=None) -> None:
         super().__init__(parent)
+        self._engine = engine
+        self._engine.image_changed.connect(self.update)
 
-        # ── image state ─────────────────────────────────────────────────────
-        self._image: QImage = ImageLoader.new_image(800, 600)
-        self._saved_image: QImage | None = None   # for shape preview
+        self._selection = SelectionManager(self)
+        self._selection.selection_changed.connect(self.update)
 
-        # ── clipboard ───────────────────────────────────────────────────────
-        self._clipboard: QImage | None = None
+        self._zoom: float = 1.0
+        self._show_grid: bool = False
+        self._offset = QPoint(0, 0)
 
-        # ── selection overlay (image coordinates) ───────────────────────────
-        self._selection: QRect | None = None
+        # All tools
+        self._pencil = PencilTool()
+        self._brush = BrushTool()
+        self._eraser = EraserTool()
+        self._spray = SprayTool()
+        self._fill = FillTool()
+        self._pipette = PipetteTool()
+        self._line = LineTool()
+        self._rect_tool = RectangleTool()
+        self._ellipse = EllipseTool()
+        self._polygon = PolygonTool()
+        self._curve = CurveTool()
+        self._text_tool = TextTool()
 
-        # ── zoom ────────────────────────────────────────────────────────────
-        self._zoom_idx = DEFAULT_ZOOM_IDX
-        self._zoom = ZOOM_LEVELS[DEFAULT_ZOOM_IDX]
+        self._pipette.color_picked.connect(self._on_color_picked)
 
-        # ── grid ────────────────────────────────────────────────────────────
-        self._show_grid = False
+        self._all_tools: dict[str, BaseTool] = {
+            "pencil": self._pencil,
+            "brush": self._brush,
+            "eraser": self._eraser,
+            "spray": self._spray,
+            "fill": self._fill,
+            "pipette": self._pipette,
+            "line": self._line,
+            "rectangle": self._rect_tool,
+            "ellipse": self._ellipse,
+            "polygon": self._polygon,
+            "curve": self._curve,
+            "text": self._text_tool,
+        }
 
-        # ── input state ─────────────────────────────────────────────────────
-        self.shift_held = False
-        self._button_held = 0
+        self._active_tool: BaseTool = self._pencil
+        self._engine.set_tool(self._active_tool)
 
-        # ── tool & colours ──────────────────────────────────────────────────
-        self._tool = None
         self._fg = QColor("#000000")
-        self._bg = QColor("#ffffff")
+        self._bg = QColor("#FFFFFF")
+        self._update_tool_colors()
 
-        # ── undo ────────────────────────────────────────────────────────────
-        self._undo = UndoManager()
+        self._dragging = False
+        self._last_btn: int = Qt.MouseButton.LeftButton
+        self._selecting = False
+        self._sel_mode = "rect"
 
         self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._apply_size()
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Public image API
-    # ═══════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def engine(self) -> DrawingEngine:
+        return self._engine
 
     @property
-    def image(self) -> QImage:
-        return self._image
+    def selection(self) -> SelectionManager:
+        return self._selection
 
-    def new_image(self, width: int, height: int,
-                  bg: QColor = QColor("#ffffff")) -> None:
-        self._image = ImageLoader.new_image(width, height, bg.name())
-        self._saved_image = None
-        self._selection = None
-        self._undo.clear()
-        self._apply_size()
+    def set_tool(self, name: str) -> None:
+        tool = self._all_tools.get(name)
+        if tool is None:
+            return
+        self._active_tool = tool
+        self._engine.set_tool(tool)
+        self.tool_changed.emit(name)
+        # Reset polygon if switching away
+        if name != "polygon":
+            self._polygon._points.clear()
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = max(0.1, min(8.0, zoom))
         self.update()
-
-    def load_image(self, image: QImage) -> None:
-        self._image = image.convertToFormat(QImage.Format.Format_ARGB32)
-        self._saved_image = None
-        self._selection = None
-        self._undo.clear()
-        self._apply_size()
-        self.update()
-
-    def replace_image(self, image: QImage) -> None:
-        """Replace the underlying image directly (e.g. after flood-fill)."""
-        self._image = image.convertToFormat(QImage.Format.Format_ARGB32)
-        self._saved_image = None
-        self.update()
-
-    # ── shape preview ───────────────────────────────────────────────────────
-
-    def begin_preview(self) -> None:
-        """Save image state before drawing a shape (preview begins)."""
-        self._saved_image = self._image.copy()
-
-    def restore_preview(self) -> None:
-        """Restore image to the saved state (redraw preview from scratch)."""
-        if self._saved_image is not None:
-            self._image = self._saved_image.copy()
-
-    def end_preview(self) -> None:
-        """Commit current image; discard saved state."""
-        self._saved_image = None
-        self.update()
-
-    # ── undo / redo ─────────────────────────────────────────────────────────
-
-    def save_undo(self) -> None:
-        self._undo.push(self._image)
-
-    def undo(self) -> None:
-        result = self._undo.undo(self._image)
-        if result is not None:
-            self._image = result
-            self._saved_image = None
-            self.update()
-
-    def redo(self) -> None:
-        result = self._undo.redo(self._image)
-        if result is not None:
-            self._image = result
-            self._saved_image = None
-            self.update()
-
-    def can_undo(self) -> bool:
-        return self._undo.can_undo()
-
-    def can_redo(self) -> bool:
-        return self._undo.can_redo()
-
-    # ── selection ───────────────────────────────────────────────────────────
-
-    def set_selection(self, rect: QRect | None) -> None:
-        self._selection = rect
-        self.update()
-
-    def copy_selection(self) -> None:
-        if self._selection and not self._selection.isEmpty():
-            self._clipboard = self._image.copy(self._selection)
-
-    def cut_selection(self) -> None:
-        if self._selection and not self._selection.isEmpty():
-            self._clipboard = self._image.copy(self._selection)
-            self.save_undo()
-            p = QPainter(self._image)
-            p.fillRect(self._selection, self._bg)
-            p.end()
-            self.update()
-
-    def paste(self) -> None:
-        if self._clipboard is not None:
-            self.save_undo()
-            p = QPainter(self._image)
-            p.drawImage(0, 0, self._clipboard)
-            p.end()
-            self._selection = None
-            self.update()
-
-    def delete_selection(self) -> None:
-        if self._selection and not self._selection.isEmpty():
-            self.save_undo()
-            p = QPainter(self._image)
-            p.fillRect(self._selection, self._bg)
-            p.end()
-            self._selection = None
-            self.update()
-
-    # ── image operations ────────────────────────────────────────────────────
-
-    def invert_colors(self) -> None:
-        self.save_undo()
-        self._image.invertPixels()
-        self.update()
-
-    def flip_horizontal(self) -> None:
-        self.save_undo()
-        self._image = self._image.mirrored(True, False)
-        self.update()
-
-    def flip_vertical(self) -> None:
-        self.save_undo()
-        self._image = self._image.mirrored(False, True)
-        self.update()
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Zoom
-    # ═══════════════════════════════════════════════════════════════════════
-
-    @property
-    def zoom(self) -> int:
-        return self._zoom
+        self.zoom_changed.emit(self._zoom)
 
     def zoom_in(self) -> None:
-        if self._zoom_idx < len(ZOOM_LEVELS) - 1:
-            self._zoom_idx += 1
-            self._set_zoom(ZOOM_LEVELS[self._zoom_idx])
+        idx = self._nearest_zoom_idx()
+        if idx < len(ZOOM_LEVELS) - 1:
+            self.set_zoom(ZOOM_LEVELS[idx + 1])
 
     def zoom_out(self) -> None:
-        if self._zoom_idx > 0:
-            self._zoom_idx -= 1
-            self._set_zoom(ZOOM_LEVELS[self._zoom_idx])
+        idx = self._nearest_zoom_idx()
+        if idx > 0:
+            self.set_zoom(ZOOM_LEVELS[idx - 1])
 
-    def set_zoom_level(self, zoom: int) -> None:
-        if zoom in ZOOM_LEVELS:
-            self._zoom_idx = ZOOM_LEVELS.index(zoom)
-            self._set_zoom(zoom)
+    def _nearest_zoom_idx(self) -> int:
+        diffs = [abs(z - self._zoom) for z in ZOOM_LEVELS]
+        return diffs.index(min(diffs))
 
-    def _set_zoom(self, zoom: int) -> None:
-        self._zoom = zoom
-        self._apply_size()
-        self.zoom_changed.emit(zoom)
-        self.update()
-
-    def _apply_size(self) -> None:
-        w = max(1, int(self._image.width() * self._zoom / 100))
-        h = max(1, int(self._image.height() * self._zoom / 100))
-        self.setFixedSize(w, h)
-
-    # ── grid ────────────────────────────────────────────────────────────────
-
-    @property
-    def show_grid(self) -> bool:
-        return self._show_grid
-
-    def toggle_grid(self) -> None:
-        self._show_grid = not self._show_grid
-        self.update()
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Tool & colour management
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def set_tool(self, tool) -> None:
-        self._tool = tool
-        if tool:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-
-    def update_colors(self, fg: QColor, bg: QColor) -> None:
+    def set_colors(self, fg: QColor, bg: QColor) -> None:
         self._fg = fg
         self._bg = bg
+        self._update_tool_colors()
 
-    # ═══════════════════════════════════════════════════════════════════════
+    def set_show_grid(self, show: bool) -> None:
+        self._show_grid = show
+        self.update()
+
+    def get_active_tool_name(self) -> str:
+        return self._active_tool.name
+
+    def get_brush(self) -> BrushTool:
+        return self._brush
+
+    def get_eraser(self) -> EraserTool:
+        return self._eraser
+
+    def get_spray(self) -> SprayTool:
+        return self._spray
+
+    def get_line(self) -> LineTool:
+        return self._line
+
+    def get_rect_tool(self) -> RectangleTool:
+        return self._rect_tool
+
+    def get_ellipse(self) -> EllipseTool:
+        return self._ellipse
+
+    def get_polygon(self) -> PolygonTool:
+        return self._polygon
+
+    # ------------------------------------------------------------------
+    # Colour picked by pipette
+    # ------------------------------------------------------------------
+    color_picked = pyqtSignal(QColor, bool)
+
+    def _on_color_picked(self, color: QColor, is_fg: bool) -> None:
+        self.color_picked.emit(color, is_fg)
+
+    def _update_tool_colors(self) -> None:
+        for tool in self._all_tools.values():
+            tool.set_colors(self._fg, self._bg)
+
+    # ------------------------------------------------------------------
     # Coordinate helpers
-    # ═══════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
+    def _to_image(self, widget_pos: QPoint) -> QPoint:
+        x = (widget_pos.x() - self._offset.x()) / self._zoom
+        y = (widget_pos.y() - self._offset.y()) / self._zoom
+        return QPoint(int(x), int(y))
 
-    def screen_to_image(self, sx: float, sy: float) -> tuple[int, int]:
-        ix = int(sx * 100 / self._zoom)
-        iy = int(sy * 100 / self._zoom)
-        return ix, iy
+    def _canvas_rect(self) -> QRect:
+        img = self._engine.image
+        w = round(img.width() * self._zoom)
+        h = round(img.height() * self._zoom)
+        return QRect(self._offset, QSize(w, h))
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Painting
-    # ═══════════════════════════════════════════════════════════════════════
-
+    # ------------------------------------------------------------------
+    # Paint
+    # ------------------------------------------------------------------
     def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        w = int(self._image.width() * self._zoom / 100)
-        h = int(self._image.height() * self._zoom / 100)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._zoom < 1.0)
 
-        # ── scaled image ────────────────────────────────────────────────────
-        p.drawImage(QRect(0, 0, w, h), self._image)
+        img = self._engine.image
+        canvas_rect = self._canvas_rect()
 
-        # ── pixel grid (zoom ≥ 200 %) ────────────────────────────────────────
-        if self._show_grid and self._zoom >= 200:
-            self._paint_grid(p, w, h)
+        # Checkerboard background
+        painter.fillRect(self.rect(), QColor("#808080"))
 
-        # ── selection overlay ────────────────────────────────────────────────
-        if self._selection and not self._selection.isEmpty():
-            self._paint_selection(p)
+        # Draw image
+        painter.drawImage(canvas_rect, img)
 
-        p.end()
+        # Pixel grid
+        if self._show_grid and self._zoom >= GRID_MIN_ZOOM:
+            self._draw_grid(painter, canvas_rect, img.width(), img.height())
 
-    def _paint_grid(self, p: QPainter, W: int, H: int) -> None:
-        pen = QPen(QColor(180, 180, 180, 160), 0)
-        p.setPen(pen)
-        scale = self._zoom / 100.0
-        x = 0.0
-        while x <= W:
-            p.drawLine(int(x), 0, int(x), H)
-            x += scale
-        y = 0.0
-        while y <= H:
-            p.drawLine(0, int(y), W, int(y))
-            y += scale
+        # Selection overlay
+        painter.save()
+        painter.translate(self._offset)
+        self._selection.draw_overlay(painter, self._zoom)
+        painter.restore()
 
-    def _paint_selection(self, p: QPainter) -> None:
-        scale = self._zoom / 100.0
-        r = self._selection
-        sx = int(r.x() * scale)
-        sy = int(r.y() * scale)
-        sw = int(r.width() * scale)
-        sh = int(r.height() * scale)
+        painter.end()
 
-        pen = QPen(QColor(0, 0, 0), 1, Qt.PenStyle.DashLine)
-        pen.setDashPattern([4, 4])
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(sx, sy, sw, sh)
+    def _draw_grid(self, painter: QPainter, canvas_rect: QRect,
+                   img_w: int, img_h: int) -> None:
+        pen = QPen(QColor(0, 0, 0, 80), 1)
+        painter.setPen(pen)
+        ox, oy = canvas_rect.x(), canvas_rect.y()
+        for ix in range(img_w + 1):
+            x = ox + round(ix * self._zoom)
+            painter.drawLine(x, oy, x, oy + canvas_rect.height())
+        for iy in range(img_h + 1):
+            y = oy + round(iy * self._zoom)
+            painter.drawLine(ox, y, ox + canvas_rect.width(), y)
 
-        pen2 = QPen(QColor(255, 255, 255), 1, Qt.PenStyle.DashLine)
-        pen2.setDashPattern([4, 4])
-        pen2.setDashOffset(4)
-        p.setPen(pen2)
-        p.drawRect(sx, sy, sw, sh)
+    # ------------------------------------------------------------------
+    # Size hint
+    # ------------------------------------------------------------------
+    def sizeHint(self) -> QSize:
+        img = self._engine.image
+        return QSize(round(img.width() * self._zoom) + 40,
+                     round(img.height() * self._zoom) + 40)
 
-    # ═══════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
     # Mouse events
-    # ═══════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        pos = self._to_image(event.pos())
+        btn = event.button()
+        self._last_btn = btn
 
-    def mousePressEvent(self, event) -> None:
-        if not self._tool:
+        if self._active_tool.name == "text":
+            self._text_tool.on_press(self._engine.image, pos, btn)
+            self._show_text_dialog(pos)
             return
-        btn = 1 if event.button() == Qt.MouseButton.LeftButton else 2
-        self._button_held = btn
-        x, y = self.screen_to_image(event.position().x(), event.position().y())
-        self._tool.set_colors(self._fg, self._bg)
-        if self._tool.on_press(self, x, y, btn):
+
+        if self._active_tool.name == "polygon":
+            # single click adds a point
+            self._engine.save_state()
+            self._polygon.add_point(self._engine.image, pos, btn)
             self.update()
-
-    def mouseMoveEvent(self, event) -> None:
-        x, y = self.screen_to_image(event.position().x(), event.position().y())
-        self.mouse_moved.emit(x, y)
-        if self._tool and self._button_held:
-            self._tool.set_colors(self._fg, self._bg)
-            if self._tool.on_move(self, x, y, self._button_held):
-                self.update()
-
-    def mouseReleaseEvent(self, event) -> None:
-        if not self._tool:
             return
-        x, y = self.screen_to_image(event.position().x(), event.position().y())
-        if self._tool.on_release(self, x, y, self._button_held):
+
+        self._dragging = True
+        self._engine.press(pos, btn)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        pos = self._to_image(event.pos())
+        if self._active_tool.name == "polygon":
+            self._polygon.close_polygon(self._engine.image)
             self.update()
-        self._button_held = 0
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Keyboard events
-    # ═══════════════════════════════════════════════════════════════════════
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = self._to_image(event.pos())
+        self.cursor_moved.emit(pos.x(), pos.y())
+        if self._dragging:
+            btn = event.buttons()
+            self._engine.move(pos, btn)
 
-    def keyPressEvent(self, event) -> None:
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        pos = self._to_image(event.pos())
+        if self._dragging:
+            self._engine.release(pos, event.button())
+            self._dragging = False
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Shift:
-            self.shift_held = True
-        if event.key() == Qt.Key.Key_Escape:
-            self._selection = None
-            self.update()
-        if self._tool:
-            self._tool.on_key_press(event.key())
+            self._line._constrain = True
+            self._rect_tool._constrain = True
+            self._ellipse._constrain = True
+        super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event) -> None:
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Shift:
-            self.shift_held = False
+            self._line._constrain = False
+            self._rect_tool._constrain = False
+            self._ellipse._constrain = False
+        super().keyReleaseEvent(event)
+
+    # ------------------------------------------------------------------
+    # Text dialog
+    # ------------------------------------------------------------------
+    def _show_text_dialog(self, pos: QPoint) -> None:
+        font_dlg = QFontDialog(QFont("Arial", 12), self)
+        font_dlg.setWindowTitle("Police de caractères")
+        if not font_dlg.exec():
+            return
+        font = font_dlg.selectedFont()
+
+        text, ok = QInputDialog.getText(self, "Saisie de texte", "Texte :")
+        if not ok or not text:
+            return
+
+        self._engine.save_state()
+        painter = QPainter(self._engine.image)
+        painter.setFont(font)
+        painter.setPen(self._fg)
+        painter.drawText(pos, text)
+        painter.end()
+        self.update()

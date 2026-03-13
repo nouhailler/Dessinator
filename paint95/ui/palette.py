@@ -1,169 +1,136 @@
-"""Colour palette widget — FG/BG indicators + 28-colour swatch grid."""
-from __future__ import annotations
+"""
+Colour palette widget — 28-colour grid + active colour display.
+"""
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QGridLayout, QFrame, QSizePolicy
+from PyQt6.QtGui import QColor, QPainter, QPen, QMouseEvent
+from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal
 
-from PyQt6.QtCore import Qt, QRect, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
-from PyQt6.QtWidgets import QWidget, QColorDialog, QHBoxLayout, QSizePolicy
+from ..color.palette_manager import PaletteManager
+from ..color.color_dialog import ColorPickerDialog
 
 
-class ColorSquares(QWidget):
-    """Two overlapping squares showing foreground (front) and background (back)."""
+class ColorSwatch(QWidget):
+    """A single colour square in the palette."""
+    clicked = pyqtSignal(QColor, int)   # color, button (1=left, 2=right)
 
-    fg_changed = pyqtSignal(QColor)
-    bg_changed = pyqtSignal(QColor)
+    def __init__(self, color: QColor, parent=None) -> None:
+        super().__init__(parent)
+        self._color = color
+        self.setFixedSize(16, 16)
+        self.setToolTip(color.name())
+
+    def set_color(self, c: QColor) -> None:
+        self._color = c
+        self.setToolTip(c.name())
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), self._color)
+        p.setPen(QPen(QColor("#888888"), 1))
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        p.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._color, 1)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.clicked.emit(self._color, 2)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        dlg = ColorPickerDialog(self._color, self)
+        if dlg.exec():
+            self.set_color(dlg.selected_color())
+            self.clicked.emit(self._color, 1)
+
+
+class ActiveColorDisplay(QWidget):
+    """Shows foreground (front) and background (back) colour boxes."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._fg = QColor("#000000")
-        self._bg = QColor("#ffffff")
-        self.setFixedSize(52, 44)
-        self.setToolTip("Clic gauche : couleur avant-plan\nClic droit : couleur arrière-plan")
+        self._bg = QColor("#FFFFFF")
+        self.setFixedSize(42, 42)
+        self.setToolTip("Couleur avant-plan / arrière-plan")
 
-    def set_fg(self, color: QColor) -> None:
-        self._fg = color
+    def set_fg(self, c: QColor) -> None:
+        self._fg = c
         self.update()
 
-    def set_bg(self, color: QColor) -> None:
-        self._bg = color
+    def set_bg(self, c: QColor) -> None:
+        self._bg = c
         self.update()
-
-    def fg(self) -> QColor:
-        return self._fg
-
-    def bg(self) -> QColor:
-        return self._bg
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        # background square (bottom-right)
-        p.setPen(QPen(Qt.GlobalColor.black, 1))
-        p.setBrush(QBrush(self._bg))
-        p.drawRect(16, 14, 28, 24)
-        # foreground square (top-left)
-        p.setBrush(QBrush(self._fg))
-        p.drawRect(4, 4, 28, 24)
+        # background box (offset)
+        bg_rect = QRect(12, 12, 26, 26)
+        p.fillRect(bg_rect, self._bg)
+        p.setPen(QPen(QColor("#555555"), 1))
+        p.drawRect(bg_rect)
+        # foreground box
+        fg_rect = QRect(4, 4, 26, 26)
+        p.fillRect(fg_rect, self._fg)
+        p.setPen(QPen(QColor("#555555"), 1))
+        p.drawRect(fg_rect)
         p.end()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            color = QColorDialog.getColor(self._fg, self, "Couleur avant-plan")
-            if color.isValid():
-                self._fg = color
-                self.update()
-                self.fg_changed.emit(color)
-        elif event.button() == Qt.MouseButton.RightButton:
-            color = QColorDialog.getColor(self._bg, self, "Couleur arrière-plan")
-            if color.isValid():
-                self._bg = color
-                self.update()
-                self.bg_changed.emit(color)
-
-
-class SwatchGrid(QWidget):
-    """14×2 grid of colour swatches."""
-
-    color_left_clicked = pyqtSignal(QColor)
-    color_right_clicked = pyqtSignal(QColor)
-
-    SWATCH = 20   # size of each swatch in pixels
-    COLS = 14
-
-    def __init__(self, colors: list[QColor], parent=None) -> None:
-        super().__init__(parent)
-        self._colors = colors
-        rows = (len(colors) + self.COLS - 1) // self.COLS
-        self.setFixedSize(self.COLS * self.SWATCH + 2,
-                          rows * self.SWATCH + 2)
-
-    def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        for i, color in enumerate(self._colors):
-            col = i % self.COLS
-            row = i // self.COLS
-            x = col * self.SWATCH + 1
-            y = row * self.SWATCH + 1
-            p.fillRect(x, y, self.SWATCH - 1, self.SWATCH - 1, color)
-            p.setPen(QPen(QColor(90, 90, 90), 0))
-            p.drawRect(x, y, self.SWATCH - 2, self.SWATCH - 2)
-        p.end()
-
-    def _color_at(self, x: int, y: int) -> QColor | None:
-        col = (x - 1) // self.SWATCH
-        row = (y - 1) // self.SWATCH
-        idx = row * self.COLS + col
-        if 0 <= idx < len(self._colors):
-            return self._colors[idx]
-        return None
-
-    def mousePressEvent(self, event) -> None:
-        color = self._color_at(int(event.position().x()),
-                               int(event.position().y()))
-        if color is None:
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.color_left_clicked.emit(color)
-        elif event.button() == Qt.MouseButton.RightButton:
-            self.color_right_clicked.emit(color)
-
-    def mouseDoubleClickEvent(self, event) -> None:
-        """Double-click opens a custom colour dialog."""
-        color = self._color_at(int(event.position().x()),
-                               int(event.position().y()))
-        base = color if color else QColor("#ffffff")
-        chosen = QColorDialog.getColor(base, self, "Choisir une couleur")
-        if chosen.isValid():
-            col = (int(event.position().x()) - 1) // self.SWATCH
-            row = (int(event.position().y()) - 1) // self.SWATCH
-            idx = row * self.COLS + col
-            if 0 <= idx < len(self._colors):
-                self._colors[idx] = chosen
-                self.update()
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.color_left_clicked.emit(chosen)
 
 
 class PaletteWidget(QWidget):
-    """Full palette bar: FG/BG squares + swatch grid."""
+    """Bottom palette bar."""
 
     fg_changed = pyqtSignal(QColor)
     bg_changed = pyqtSignal(QColor)
 
-    def __init__(self, palette_manager, parent=None) -> None:
+    def __init__(self, manager: PaletteManager, parent=None) -> None:
         super().__init__(parent)
-        self._pm = palette_manager
-        self._build()
+        self._manager = manager
+        self._swatches: list[ColorSwatch] = []
 
-    def _build(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(8)
+        main = QHBoxLayout(self)
+        main.setContentsMargins(4, 2, 4, 2)
+        main.setSpacing(4)
 
-        self._squares = ColorSquares()
-        self._squares.set_fg(self._pm.foreground)
-        self._squares.set_bg(self._pm.background)
-        self._squares.fg_changed.connect(self._on_fg)
-        self._squares.bg_changed.connect(self._on_bg)
-        layout.addWidget(self._squares, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._active_display = ActiveColorDisplay()
+        main.addWidget(self._active_display)
 
-        self._grid = SwatchGrid(self._pm.colors)
-        self._grid.color_left_clicked.connect(self._on_fg)
-        self._grid.color_right_clicked.connect(self._on_bg)
-        layout.addWidget(self._grid, alignment=Qt.AlignmentFlag.AlignVCenter)
-        layout.addStretch()
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(1)
+        grid.setContentsMargins(0, 0, 0, 0)
 
-    def _on_fg(self, color: QColor) -> None:
-        self._pm.foreground = color
-        self._squares.set_fg(color)
-        self.fg_changed.emit(color)
+        colors = manager.colors
+        for i, color in enumerate(colors):
+            swatch = ColorSwatch(color)
+            swatch.clicked.connect(self._on_swatch_click)
+            self._swatches.append(swatch)
+            row = i // 14
+            col = i % 14
+            grid.addWidget(swatch, row, col)
 
-    def _on_bg(self, color: QColor) -> None:
-        self._pm.background = color
-        self._squares.set_bg(color)
-        self.bg_changed.emit(color)
+        main.addWidget(grid_widget)
+        main.addStretch()
+
+        self._update_display()
+
+    def _on_swatch_click(self, color: QColor, button: int) -> None:
+        if button == 1:
+            self._manager.foreground = color
+            self.fg_changed.emit(color)
+        else:
+            self._manager.background = color
+            self.bg_changed.emit(color)
+        self._update_display()
+
+    def _update_display(self) -> None:
+        self._active_display.set_fg(self._manager.foreground)
+        self._active_display.set_bg(self._manager.background)
 
     def set_fg(self, color: QColor) -> None:
-        self._on_fg(color)
+        self._manager.foreground = color
+        self._update_display()
 
     def set_bg(self, color: QColor) -> None:
-        self._on_bg(color)
+        self._manager.background = color
+        self._update_display()

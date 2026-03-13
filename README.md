@@ -1,134 +1,135 @@
 # Dessinator
 
-Un outil de dessin moderne inspiré de Microsoft Paint, écrit en Python pour Linux.
+Un outil de dessin moderne inspiré de Microsoft Paint, écrit en Python 3 avec PyQt6.
 
 ## Fonctionnalités
 
-### Outils de dessin
-| Icône | Outil | Description |
-|-------|-------|-------------|
-| ✏ | Crayon | Dessin pixel par pixel (algorithme de Bresenham) |
-| 🖌 | Pinceau | Pinceau avec tailles et formes configurables (1/3/5/8 px, rond/carré) |
-| ⌫ | Gomme | Efface vers la couleur d'arrière-plan (8/16/32 px) |
-| ✦ | Aérographe | Spray avec rayon et densité configurables |
-| ▣ | Remplissage | Seau de remplissage performant (flood-fill via Pillow) |
-| ⊕ | Pipette | Sélecteur de couleur depuis le canvas |
-| A | Texte | Insertion de texte rasterisé avec choix de police |
-| ⬚ | Sélection | Sélection rectangulaire (copier/couper/coller) |
-| / | Ligne | Trait droit (Shift = horizontal/vertical) |
-| ▭ | Rectangle | Contour, rempli ou les deux (épaisseur configurable) |
-| ○ | Ellipse | Ellipse / cercle (Shift = cercle parfait) |
-| ⬡ | Polygone | Polygone libre (clic droit = fermer la forme) |
-
-### Autres fonctionnalités
-- **Zoom** : 10 % à 800 % (9 niveaux) avec grille pixel optionnelle (activée ≥ 200 %)
-- **Annulation/Rétablissement** : 3 niveaux (Ctrl+Z / Ctrl+Y), pile circulaire
-- **Palette** : 28 couleurs inspirées de Paint, personnalisable et sauvegardable en JSON
-- **Formats** : lecture et écriture PNG / JPEG uniquement (via Pillow)
-- **Opérations image** : inversion des couleurs, retournement horizontal/vertical, redimensionnement
-- **Copier / Couper / Coller** sur la sélection rectangulaire
-- **Preview en direct** pour les formes géométriques (ligne, rectangle, ellipse, polygone)
-- **Shift** pour contraindre les formes (carré parfait, cercle parfait, ligne droite)
+- **Outils de dessin** : Crayon (Bresenham), Pinceau (rond/carré, 4 tailles), Gomme, Aérographe, Seau de remplissage (scanline flood fill), Pipette
+- **Formes** : Ligne, Rectangle, Ellipse, Polygone, Courbe de Bézier
+- **Texte** : Insertion de texte rasterisé avec sélection de police
+- **Sélection** : Rectangle de sélection (copier/couper/coller/supprimer)
+- **Zoom** : 10 % à 800 %, grille pixel visible à partir de ×4
+- **Historique** : 3 niveaux d'annulation (Ctrl+Z / Ctrl+Y)
+- **Palette** : 28 couleurs style Paint 95, personnalisable et sauvegardable (JSON)
+- **Formats** : Lecture/écriture PNG et JPEG (via Pillow)
+- **Opérations image** : Inverser les couleurs, retourner (H/V), redimensionner
 
 ## Installation
 
-### Prérequis
-
-- Python 3.11+
-- Linux (Ubuntu 22.04+ recommandé)
-
-### Dépendances Python
-
 ```bash
-pip install PyQt6 Pillow
+pip install -r requirements.txt
 ```
 
-### Bibliothèques système (si absentes)
+### Dépendances
 
-```bash
-sudo apt install libegl1 libxcb-cursor0
-```
+| Paquet   | Rôle                        |
+|----------|-----------------------------|
+| PyQt6    | Interface graphique (Qt 6)  |
+| Pillow   | Lecture/écriture PNG/JPEG   |
+| numpy    | Optionnel (performances)    |
 
 ## Lancement
 
 ```bash
-cd paint95
 python main.py
-
-# Ouvrir directement un fichier image :
-python main.py monimage.png
 ```
 
-## Raccourcis clavier
+ou
 
-| Action | Raccourci |
-|--------|-----------|
-| Nouveau | Ctrl+N |
-| Ouvrir | Ctrl+O |
-| Enregistrer | Ctrl+S |
-| Enregistrer sous | Ctrl+Shift+S |
-| Annuler | Ctrl+Z |
-| Rétablir | Ctrl+Y |
-| Copier | Ctrl+C |
-| Couper | Ctrl+X |
-| Coller | Ctrl+V |
-| Supprimer sélection | Suppr |
-| Zoom + | Ctrl++ |
-| Zoom - | Ctrl+- |
-| Grille pixels | Ctrl+G |
-| Quitter | Ctrl+Q |
-
-### Interactions souris
-- **Clic gauche** : dessiner / sélectionner la couleur avant-plan
-- **Clic droit** : dessiner avec l'arrière-plan / sélectionner la couleur arrière-plan / fermer un polygone
-- **Shift** maintenu : contrainte géométrique (carré, cercle, ligne droite)
-- **Échap** : annuler la sélection
+```bash
+python -m paint95.main
+```
 
 ## Architecture
 
 ```
 paint95/
-├── main.py                    # Point d'entrée (supporte fichier en argument)
-├── canvas/
-│   └── canvas_widget.py      # Widget de dessin (QImage + zoom + preview shapes)
-├── tools/
-│   ├── base_tool.py          # Classe abstraite de base
-│   ├── pencil.py             # Crayon (Bresenham)
-│   ├── brush.py              # Pinceau multi-tailles
-│   ├── eraser.py             # Gomme
-│   ├── spray.py              # Aérographe
-│   ├── fill.py               # Remplissage (Pillow ImageDraw.floodfill)
-│   ├── pipette.py            # Pipette / color picker
-│   ├── text_tool.py          # Texte rasterisé (Qt FontDialog)
-│   ├── selection_tool.py     # Sélection rectangulaire
-│   └── shapes.py             # Ligne, Rectangle, Ellipse, Polygone
+├── main.py                  # Point d'entrée
 ├── ui/
-│   ├── main_window.py        # Fenêtre principale, menus, raccourcis
-│   ├── toolbar.py            # Boîte à outils + panneau d'options
-│   └── palette.py            # Palette couleurs (FG/BG + 28 swatches)
+│   ├── main_window.py       # Fenêtre principale + menus
+│   ├── toolbar.py           # Barre d'outils verticale
+│   ├── palette.py           # Palette de couleurs
+│   └── statusbar.py         # Barre d'état
+├── canvas/
+│   ├── canvas_widget.py     # Widget de dessin (zoom, grid, événements)
+│   ├── drawing_engine.py    # Moteur de dessin + buffer QImage
+│   └── selection_manager.py # Gestion des sélections
+├── tools/
+│   ├── base.py              # Classe abstraite outil
+│   ├── pencil.py            # Crayon (algorithme de Bresenham)
+│   ├── brush.py             # Pinceau
+│   ├── eraser.py            # Gomme
+│   ├── spray.py             # Aérographe
+│   ├── fill.py              # Seau (scanline flood fill)
+│   ├── pipette.py           # Pipette couleur
+│   └── shapes.py            # Ligne, Rectangle, Ellipse, Polygone, Courbe, Texte
+├── io/
+│   ├── image_loader.py      # Chargement PNG/JPEG via Pillow
+│   └── image_saver.py       # Sauvegarde PNG/JPEG via Pillow
 ├── color/
-│   └── palette_manager.py    # Gestion palette et persistance JSON
-├── file_io/
-│   ├── image_loader.py       # Chargement PNG/JPEG → QImage (ARGB32)
-│   └── image_saver.py        # Sauvegarde QImage → PNG/JPEG via Pillow
+│   ├── palette_manager.py   # Gestion palette + persistance JSON
+│   └── color_dialog.py      # Sélecteur de couleur
 └── history/
-    └── undo_manager.py       # Stack circulaire d'annulation (3 niveaux max)
+    └── undo_manager.py      # Pile circulaire d'annulation (3 niveaux)
 ```
 
-## Technologies
+## Raccourcis clavier
 
-| Bibliothèque | Usage |
-|---|---|
-| **PyQt6** | Interface graphique, canvas QImage, rendu, dialogs |
-| **Pillow** | Flood-fill performant, export PNG/JPEG |
-| **Python 3.11+** | Type hints modernes, `from __future__ import annotations` |
+| Action             | Raccourci      |
+|--------------------|----------------|
+| Nouveau            | Ctrl+N         |
+| Ouvrir             | Ctrl+O         |
+| Enregistrer        | Ctrl+S         |
+| Enregistrer sous   | Ctrl+Shift+S   |
+| Annuler            | Ctrl+Z         |
+| Rétablir           | Ctrl+Y         |
+| Copier             | Ctrl+C         |
+| Couper             | Ctrl+X         |
+| Coller             | Ctrl+V         |
+| Supprimer          | Suppr          |
+| Tout sélectionner  | Ctrl+A         |
+| Zoom +             | Ctrl++         |
+| Zoom -             | Ctrl+-         |
+| Zoom 100%          | Ctrl+0         |
+| Grille pixel       | Ctrl+G         |
+| Quitter            | Ctrl+Q         |
 
-## Spécifications techniques
+### Sélection rapide d'outil (touche unique)
 
-- Canvas raster RGB/ARGB en mémoire (`QImage.Format_ARGB32`)
-- Dessin direct sur QImage via `QPainter` (formes) ou `setPixelColor` (pixel art)
-- Algorithme de Bresenham pour le crayon
-- Flood-fill optimisé via `PIL.ImageDraw.floodfill` (C natif)
-- Preview des formes par snapshot+restore (sans double-buffer séparé)
-- Consommation mémoire maîtrisée : 3 snapshots undo maximum en RAM
-- Canvas supporté jusqu'à 4096×4096 px
+| Touche | Outil       |
+|--------|-------------|
+| P      | Crayon      |
+| B      | Pinceau     |
+| E      | Gomme       |
+| A      | Aérographe  |
+| F      | Remplissage |
+| I      | Pipette     |
+| L      | Ligne       |
+| R      | Rectangle   |
+| O      | Ellipse     |
+| G      | Polygone    |
+| U      | Courbe      |
+| X      | Texte       |
+| S      | Sél. rect.  |
+| W      | Sél. libre  |
+
+## Utilisation du polygone
+
+1. Cliquez pour ajouter chaque sommet
+2. Double-cliquez pour fermer et valider le polygone
+
+## Utilisation de la courbe
+
+1. Faites un cliquer-glisser pour définir le début et la fin
+2. Cliquez une seconde fois pour placer le point de contrôle
+
+## Palette personnalisée
+
+La palette peut être sauvegardée et rechargée via **Palette → Sauvegarder/Charger palette** (format JSON).
+Double-cliquez sur une couleur de la palette pour la modifier.
+
+## Performances
+
+- Canvas jusqu'à 4096×4096 px
+- Dessin fluide à 60 FPS (visé)
+- Consommation mémoire < 200 MB pour un canvas standard
