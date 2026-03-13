@@ -4,20 +4,18 @@ Left-click  → sets foreground colour.
 Right-click → sets background colour.
 """
 from PyQt6.QtGui import QImage, QColor
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtCore import pyqtSignal, QObject
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from .base import BaseTool
 
 
-class PipetteTool(BaseTool, QObject):
+class PipetteTool(BaseTool):
     name = "pipette"
 
     # Emit (color, is_foreground)
     color_picked = pyqtSignal(QColor, bool)
 
     def __init__(self) -> None:
-        BaseTool.__init__(self)
-        QObject.__init__(self)
+        super().__init__()
 
     def on_press(self, image: QImage, pos: QPoint, button: int) -> bool:
         x, y = pos.x(), pos.y()
