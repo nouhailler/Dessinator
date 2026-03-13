@@ -14,7 +14,6 @@ def main() -> None:
     app.setOrganizationName("Dessinator")
 
     # High-DPI support
-    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
 
     win = MainWindow()
     win.show()
