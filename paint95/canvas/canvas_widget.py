@@ -26,6 +26,12 @@ ZOOM_LEVELS = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 GRID_MIN_ZOOM = 4.0
 
 
+class _SelectRectTool(BaseTool):
+    name = "select_rect"
+
+class _SelectFreeTool(BaseTool):
+    name = "select_free"
+
 class CanvasWidget(QWidget):
     """The central drawing surface."""
 
@@ -74,6 +80,8 @@ class CanvasWidget(QWidget):
             "polygon": self._polygon,
             "curve": self._curve,
             "text": self._text_tool,
+            "select_rect": _SelectRectTool(),
+            "select_free": _SelectFreeTool(),
         }
 
         self._active_tool: BaseTool = self._pencil
@@ -260,8 +268,15 @@ class CanvasWidget(QWidget):
             self.update()
             return
 
-        self._dragging = True
-        self._engine.press(pos, btn)
+        if self._active_tool.name == "select_rect":
+            self._selection.begin_rect(pos)
+            self._selecting = True
+        elif self._active_tool.name == "select_free":
+            self._selection.begin_free(pos)
+            self._selecting = True
+        else:
+            self._dragging = True
+            self._engine.press(pos, btn)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
@@ -272,13 +287,23 @@ class CanvasWidget(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
         self.cursor_moved.emit(pos.x(), pos.y())
-        if self._dragging:
+        if self._selecting:
+            if self._active_tool.name == "select_rect":
+                self._selection.update_rect(pos)
+            else:
+                self._selection.update_free(pos)
+            self.update()
+        elif self._dragging:
             btn = event.buttons()
             self._engine.move(pos, btn)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         pos = self._to_image(event.pos())
-        if self._dragging:
+        if self._selecting:
+            self._selection.close_selection()
+            self._selecting = False
+            self.update()
+        elif self._dragging:
             self._engine.release(pos, event.button())
             self._dragging = False
 

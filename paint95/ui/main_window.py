@@ -387,11 +387,6 @@ class MainWindow(QMainWindow):
     # Tool / colour slots
     # ------------------------------------------------------------------
     def _on_tool_selected(self, name: str) -> None:
-        if name == "select_rect":
-            # handled by canvas internally (future)
-            return
-        if name == "select_free":
-            return
         self._canvas.set_tool(name)
 
     def _on_tool_changed(self, name: str) -> None:
@@ -541,7 +536,17 @@ class MainWindow(QMainWindow):
 
     def _edit_paste(self) -> None:
         sel = self._canvas.selection
-        if sel.get_clipboard() is not None:
+        # Vérifier d'abord le presse-papier système (screenshots, etc.)
+        from PyQt6.QtWidgets import QApplication
+        qt_clipboard = QApplication.clipboard().image()
+        if not qt_clipboard.isNull():
+            self._engine.save_state()
+            from PyQt6.QtGui import QPainter
+            p = QPainter(self._engine.image)
+            p.drawImage(0, 0, qt_clipboard)
+            p.end()
+            self._engine.image_changed.emit()
+        elif sel.get_clipboard() is not None:
             self._engine.save_state()
             sel.paste(self._engine.image)
             self._engine.image_changed.emit()
